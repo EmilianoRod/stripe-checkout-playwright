@@ -19,6 +19,8 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
         const email = page.getByRole('textbox', { name: /email/i });
         await expect(email).toBeVisible({ timeout: 10000 });
         await email.fill(TEST_EMAIL);
+        await email.press('Enter'); // optional, speeds up Payment Element render
+
 
 
         // 1) Wait for iframes to exist at all
@@ -139,14 +141,22 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
         await handle3DSChallenge(page);
 
         // 7) Finish either way (success page or post-payment state)
-        await Promise.race([
-                page.waitForURL(/(success|thank|return|receipt)/i, { timeout: 15000 }).catch(() => { }),
-                page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => { }),
-        ]);
+        const leftCheckout = await page
+                .waitForURL(
+                        url =>
+                                /success|thank|return|receipt/i.test(url.toString()) ||
+                                !/checkout\.stripe\.com/i.test(url.toString()),
+                        { timeout: 20000 }
+                )
+                .then(() => true)
+                .catch(() => false);
 
+        expect(leftCheckout, 'Did not reach a success/return URL from Stripe Checkout').toBeTruthy();
 
+        // Hand back the final URL to the Java bridge
         console.log(`PW_BRIDGE::SUCCESS_URL ${page.url()}`);
-});
+
+
 
 // ---------- helpers ----------
 
