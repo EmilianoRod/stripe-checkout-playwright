@@ -21,8 +21,6 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
         await email.fill(TEST_EMAIL);
         await email.press('Enter'); // optional, speeds up Payment Element render
 
-
-
         // 1) Wait for iframes to exist at all
         await expect(async () => {
                 expect(await page.locator('iframe').count()).toBeGreaterThan(0);
@@ -156,89 +154,87 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
         // Hand back the final URL to the Java bridge
         console.log(`PW_BRIDGE::SUCCESS_URL ${page.url()}`);
 
-
-
-// ---------- helpers ----------
-
-async function openCardTabIfPresent(page: Page) {
-        const cardTab = page.locator(
-                '[data-testid="card-tab"], [role="tab"][data-testid*="card"], ' +
-                'button[aria-controls*="card"], button[aria-label*="card" i], ' +
-                'button:has-text("Pay with card"), button:has-text("Card")'
-        );
-        if (await cardTab.count()) {
-                try { await cardTab.first().click(); } catch { /* ignore */ }
-                await page.waitForTimeout(300); // let Stripe re-render
-        }
-}
-
-/** Find the correct Stripe inner Payment Element frame (skips express/hcaptcha/controller). */
-async function findStripePaymentFrame(page: Page): Promise<Frame | null> {
-        // up to ~3 seconds total (10 * 300ms)
-        for (let attempt = 0; attempt < 10; attempt++) {
-                await openCardTabIfPresent(page);
-                for (const f of page.frames()) {
-                        try {
-                                const url = (f.url() || '').toLowerCase();
-                                if (url.includes('express-checkout') || url.includes('hcaptcha') || url.includes('controller')) continue;
-
-                                const hasCard = await f.evaluate(() =>
-                                        !!document.querySelector(
-                                                '[data-elements-stable-field-name="cardNumber"],' +
-                                                'input[autocomplete="cc-number"], input[name="cardnumber"], .InputElement'
-                                        )
-                                );
-                                if (hasCard) return f;
-                        } catch { /* ignore cross-origin */ }
-                }
-                await page.waitForTimeout(300);
-        }
-        return null;
-}
-
-/** Handle Stripe 3DS challenge if it appears; noop if it doesn’t. */
-async function handle3DSChallenge(page: Page): Promise<void> {
-        const CHALLENGE_IFRAME_SELECTOR = [
-                'iframe[title*="challenge" i]',
-                'iframe[src*="3ds" i]',
-                'iframe[src*="acs" i]',
-                'iframe[name^="__privateStripeFrame"]',
-                'iframe[title*="authentication" i]',
-        ].join(',');
-
-        // Wait up to 6s for a 3DS challenge to show (many flows won’t show one)
-        const challengeEl = await page.waitForSelector(CHALLENGE_IFRAME_SELECTOR, { timeout: 6000 }).catch(() => null);
-        if (!challengeEl) return;
-
-        const frame = await challengeEl.contentFrame();
-        if (!frame) return;
-
-        // Try a few common button labels
-        const approveButton = frame.getByRole('button', {
-                name: /complete authentication|authorize|approve|complete|submit/i,
-        }).first();
-
-        const fallbackClickable = frame.locator(
-                [
-                        'button:has-text("Complete")',
-                        'button:has-text("Authorize")',
-                        'button:has-text("Approve")',
-                        'input[type="submit"]',
-                        'a:has-text("Complete")',
-                ].join(', ')
-        ).first();
-
-        if (await approveButton.isVisible().catch(() => false)) {
-                await approveButton.click();
-        } else if (await fallbackClickable.isVisible().catch(() => false)) {
-                await fallbackClickable.click();
-        } else {
-                const anyContinue = frame.locator('text=/continue|next|ok/i').first();
-                if (await anyContinue.isVisible().catch(() => false)) {
-                        await anyContinue.click();
+        // ---------- helpers (nested) ----------
+        async function openCardTabIfPresent(page: Page) {
+                const cardTab = page.locator(
+                        '[data-testid="card-tab"], [role="tab"][data-testid*="card"], ' +
+                        'button[aria-controls*="card"], button[aria-label*="card" i], ' +
+                        'button:has-text("Pay with card"), button:has-text("Card")'
+                );
+                if (await cardTab.count()) {
+                        try { await cardTab.first().click(); } catch { /* ignore */ }
+                        await page.waitForTimeout(300); // let Stripe re-render
                 }
         }
 
-        // Give it a moment to return control
-        await page.waitForLoadState('networkidle').catch(() => { });
-}
+        /** Find the correct Stripe inner Payment Element frame (skips express/hcaptcha/controller). */
+        async function findStripePaymentFrame(page: Page): Promise<Frame | null> {
+                // up to ~3 seconds total (10 * 300ms)
+                for (let attempt = 0; attempt < 10; attempt++) {
+                        await openCardTabIfPresent(page);
+                        for (const f of page.frames()) {
+                                try {
+                                        const url = (f.url() || '').toLowerCase();
+                                        if (url.includes('express-checkout') || url.includes('hcaptcha') || url.includes('controller')) continue;
+
+                                        const hasCard = await f.evaluate(() =>
+                                                !!document.querySelector(
+                                                        '[data-elements-stable-field-name="cardNumber"],' +
+                                                        'input[autocomplete="cc-number"], input[name="cardnumber"], .InputElement'
+                                                )
+                                        );
+                                        if (hasCard) return f;
+                                } catch { /* ignore cross-origin */ }
+                        }
+                        await page.waitForTimeout(300);
+                }
+                return null;
+        }
+
+        /** Handle Stripe 3DS challenge if it appears; noop if it doesn’t. */
+        async function handle3DSChallenge(page: Page): Promise<void> {
+                const CHALLENGE_IFRAME_SELECTOR = [
+                        'iframe[title*="challenge" i]',
+                        'iframe[src*="3ds" i]',
+                        'iframe[src*="acs" i]',
+                        'iframe[name^="__privateStripeFrame"]',
+                        'iframe[title*="authentication" i]',
+                ].join(',');
+
+                // Wait up to 6s for a 3DS challenge to show (many flows won’t show one)
+                const challengeEl = await page.waitForSelector(CHALLENGE_IFRAME_SELECTOR, { timeout: 6000 }).catch(() => null);
+                if (!challengeEl) return;
+
+                const frame = await challengeEl.contentFrame();
+                if (!frame) return;
+
+                // Try a few common button labels
+                const approveButton = frame.getByRole('button', {
+                        name: /complete authentication|authorize|approve|complete|submit/i,
+                }).first();
+
+                const fallbackClickable = frame.locator(
+                        [
+                                'button:has-text("Complete")',
+                                'button:has-text("Authorize")',
+                                'button:has-text("Approve")',
+                                'input[type="submit"]',
+                                'a:has-text("Complete")',
+                        ].join(', ')
+                ).first();
+
+                if (await approveButton.isVisible().catch(() => false)) {
+                        await approveButton.click();
+                } else if (await fallbackClickable.isVisible().catch(() => false)) {
+                        await fallbackClickable.click();
+                } else {
+                        const anyContinue = frame.locator('text=/continue|next|ok/i').first();
+                        if (await anyContinue.isVisible().catch(() => false)) {
+                                await anyContinue.click();
+                        }
+                }
+
+                // Give it a moment to return control
+                await page.waitForLoadState('networkidle').catch(() => { });
+        }
+});
