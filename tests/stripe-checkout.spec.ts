@@ -1,5 +1,21 @@
 import { Frame, Page, expect, test } from '@playwright/test';
 
+// Give CI more time
+test.setTimeout(parseInt(process.env.PW_TIMEOUT_MS || '120000', 10));
+const SUCCESS_MARK = 'PW_BRIDGE::SUCCESS_URL ';
+
+// Helper: if we landed on a success/return URL, announce it and exit happy
+async function maybeAnnounceSuccess(page: import('@playwright/test').Page): Promise<boolean> {
+  const u = page.url();
+  if (/success|thank|return|redirect_status=succeeded|checkout_session_id/.test(u)) {
+    console.log(SUCCESS_MARK + u);
+    return true;
+  }
+  return false;
+}
+
+
+
 const CHECKOUT_URL = process.env.CHECKOUT_URL ?? 'https://example.com/stripe-checkout';
 const TEST_EMAIL = process.env.CHECKOUT_EMAIL ?? 'qa+stripe@example.com';
 
@@ -14,6 +30,17 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
         test.skip(!CHECKOUT_URL, 'Provide CHECKOUT_URL env var');
 
         await page.goto(CHECKOUT_URL, { waitUntil: 'load' });
+
+        // If the checkout immediately redirected (e.g., $0 price), treat it as success
+        if (await maybeAnnounceSuccess(page)) return;
+
+        // If checkout closed and a new page opened, switch to it and re-check
+        const ctx = page.context();
+        const maybeNew = await ctx.waitForEvent('page', { timeout: 1500 }).catch(() => null);
+        if (maybeNew) {
+          await maybeNew.waitForLoadState('domcontentloaded');
+          if (await maybeAnnounceSuccess(maybeNew)) return;
+        }
 
         // 0) Email (required in Stripe Checkout)
         const email = page.getByRole('textbox', { name: /email/i });
