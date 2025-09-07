@@ -3,7 +3,7 @@ import { Frame, Page, expect, test } from '@playwright/test';
 // === small helpers (minimal changes) ===
 const SUCCESS_MARK = 'PW_BRIDGE::SUCCESS_URL ';
 const CI = !!process.env.CI;
-const FAKE_SUCCESS = process.env.PW_STRIPE_FAKE_SUCCESS === '1'; // <— NEW
+const FAKE_SUCCESS = process.env.PW_STRIPE_FAKE_SUCCESS === '1';
 
 // Give CI more time (env overrides)
 const TEST_TIMEOUT = parseInt(process.env.PW_TIMEOUT_MS || (CI ? '180000' : '120000'), 10);
@@ -24,8 +24,8 @@ async function maybeAnnounceSuccess(page: Page): Promise<boolean> {
   return false;
 }
 
-// Quick detector for CI bot-protection wall (hCaptcha)
-async function isHcaptchaGate(page: Page): Promise<boolean> {
+// Detects that Stripe loaded hCaptcha frames (may be present even when not blocking).
+async function isHcaptchaPresent(page: Page): Promise<boolean> {
   const sel = [
     'iframe[src*="hcaptcha"]',
     'iframe[src*="HCaptcha"]',
@@ -79,16 +79,7 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
   test.skip(!CHECKOUT_URL, 'Provide CHECKOUT_URL env var');
 
   await page.goto(CHECKOUT_URL, { waitUntil: 'domcontentloaded' });
-  const hasHCaptcha = await page.locator('iframe[src*="hcaptcha"], iframe[src*="captcha"]').first().count();
-  if (hasHCaptcha) console.warn('[PW] hCaptcha detected on this run — running headed helps avoid this on CI.');
-
   await page.waitForLoadState('networkidle', { timeout: CI ? 10000 : 5000 }).catch(() => {});
-
-  // If CI is configured to bypass (useful when hCaptcha blocks PE), short-circuit green
-  if (FAKE_SUCCESS) {
-    console.log(`${SUCCESS_MARK}${page.url()}?redirect_status=succeeded#bypass=ci`);
-    return;
-  }
 
   // If it instantly redirected (free/zero price), celebrate and exit
   if (await maybeAnnounceSuccess(page)) return;
@@ -107,14 +98,26 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
   await email.fill(TEST_EMAIL);
   await email.press('Enter').catch(() => {}); // optional, nudges PE render
 
-  // If Stripe shows hCaptcha on this IP, fail fast with an actionable message
-  if (await isHcaptchaGate(page)) {
-    test.fail(true, 'Stripe presented hCaptcha on this CI IP — Payment Element will not render. Enable PW_STRIPE_FAKE_SUCCESS=1 or ask Stripe to allowlist this IP for test mode.');
-  }
-
   // 1) Wait until Stripe PE (split or unified) is actually ready
   const mode = await waitForStripePaymentElement(page, CI ? 90000 : 45000);
-  expect(mode, 'Stripe Payment Element did not render in time (check network/CDN access or hCaptcha)').not.toBeNull();
+
+  // If PE didn't render, see whether hCaptcha is present and handle accordingly
+  if (!mode) {
+    if (await isHcaptchaPresent(page)) {
+      console.warn('[PW] hCaptcha detected and Payment Element did not render.');
+      if (FAKE_SUCCESS) {
+        console.log(`${SUCCESS_MARK}${page.url()}?redirect_status=succeeded#bypass=ci`);
+        return;
+      }
+      // Hard error (so Java sees a non-zero exit) instead of marking "expected fail"
+      throw new Error('Stripe presented hCaptcha on this run and blocked the Payment Element. ' +
+        'Either run headed with a human solve, allowlist the CI IP in Stripe test mode, ' +
+        'or set PW_STRIPE_FAKE_SUCCESS=1 to bypass (no real purchase).');
+    }
+
+    // No hCaptcha, just failed to render PE ⇒ normal assertion
+    expect(mode, 'Stripe Payment Element did not render in time (check network/CDN access)').not.toBeNull();
+  }
 
   // 2) Tap "Pay with card" tab if present, but don’t die if page was closed meanwhile
   const cardTab = page.locator(
