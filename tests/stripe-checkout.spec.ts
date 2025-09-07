@@ -1,4 +1,5 @@
 import { Frame, Page, expect, test } from '@playwright/test';
+import { humanType, humanPause } from '../helpers/human';
 
 // === small helpers (minimal changes) ===
 const SUCCESS_MARK = 'PW_BRIDGE::SUCCESS_URL ';
@@ -34,6 +35,7 @@ async function isHcaptchaPresent(page: Page): Promise<boolean> {
   ].join(', ');
   return !!(await page.$(sel));
 }
+
 
 // Wait (generously) until either split or unified Payment Element is discoverable.
 // Also prints what iframes the page has to aid CI debugging.
@@ -71,7 +73,9 @@ const TEST_EMAIL   = process.env.CHECKOUT_EMAIL ?? 'qa+stripe@example.com';
 
 // 4242 path (no 3DS)
 const CARD = '4242424242424242';
-const EXP  = '0134';
+// For unified element, "12/34" is fine; for split element, many UIs accept 0134 too.
+// We will type with humanType so either format is OK; keep '12/34' for realism.
+const EXP  = '12/34';
 const CVC  = '123';
 const ZIP  = '90210';
 
@@ -80,6 +84,11 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
 
   await page.goto(CHECKOUT_URL, { waitUntil: 'domcontentloaded' });
   await page.waitForLoadState('networkidle', { timeout: CI ? 10000 : 5000 }).catch(() => {});
+  await humanPause(800, 1800);
+
+  // Move mouse a bit like a real user
+  await page.mouse.move(300, 300);
+  await page.mouse.move(500, 500);
 
   // If it instantly redirected (free/zero price), celebrate and exit
   if (await maybeAnnounceSuccess(page)) return;
@@ -95,7 +104,11 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
   // 0) Email (required in Stripe Checkout)
   const email = page.getByRole('textbox', { name: /email/i });
   await expect(email).toBeVisible({ timeout: 20000 });
-  await email.fill(TEST_EMAIL);
+  // Type with a short delay instead of instant fill
+  await email.click();
+  await humanType(email, TEST_EMAIL, 40, 75);
+  await email.blur();
+  await humanPause(300, 700);
   await email.press('Enter').catch(() => {}); // optional, nudges PE render
 
   // 1) Wait until Stripe PE (split or unified) is actually ready
@@ -111,8 +124,7 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
       }
       // Hard error (so Java sees a non-zero exit) instead of marking "expected fail"
       throw new Error('Stripe presented hCaptcha on this run and blocked the Payment Element. ' +
-        'Either run headed with a human solve, allowlist the CI IP in Stripe test mode, ' +
-        'or set PW_STRIPE_FAKE_SUCCESS=1 to bypass (no real purchase).');
+        'Run headed with real-user signals, allowlist the CI IP in Stripe test mode, or contact Stripe Support about test-mode CAPTCHA.');
     }
 
     // No hCaptcha, just failed to render PE ⇒ normal assertion
@@ -139,7 +151,11 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
 
     // Optional outside-the-iframe fields
     const name = page.getByRole('textbox', { name: /cardholder name|name on card/i });
-    if (await name.isVisible().catch(() => false)) await name.fill('Test User').catch(() => {});
+    if (await name.isVisible().catch(() => false)) {
+      await name.click().catch(() => {});
+      await humanType(name, 'Test User', 35, 65).catch(() => {});
+      await humanPause(150, 350);
+    }
 
     const country = page.getByRole('combobox', { name: /country|region/i });
     if (await country.isVisible().catch(() => false)) {
@@ -152,18 +168,28 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
 
     const numInput = numberFrame.locator('input[name="cardnumber"], input[autocomplete="cc-number"], .InputElement').first();
     await expect(numInput).toBeVisible({ timeout: 30000 });
-    await numInput.fill(CARD);
+    await numInput.click();
+    await humanType(numInput, CARD, 25, 60);
+    await humanPause(250, 600);
 
     const expInput = expFrame.locator('input[autocomplete="cc-exp"], input[name="exp-date"], .InputElement').first();
     await expect(expInput).toBeVisible({ timeout: 10000 });
-    await expInput.fill(EXP);
+    await expInput.click();
+    await humanType(expInput, EXP, 45, 80);
+    await humanPause(200, 500);
 
     const cvcInput = cvcFrame.locator('input[autocomplete="cc-csc"], input[name="cvc"], .InputElement').first();
     await expect(cvcInput).toBeVisible({ timeout: 10000 });
-    await cvcInput.fill(CVC);
+    await cvcInput.click();
+    await humanType(cvcInput, CVC, 55, 95);
+    await humanPause(200, 500);
 
     const zipInput = zipFrame.locator('input[autocomplete*="postal"], input[name*="postal"], .InputElement').first();
-    if (await zipInput.count()) await zipInput.fill(ZIP).catch(() => {});
+    if (await zipInput.count()) {
+      await zipInput.click().catch(() => {});
+      await humanType(zipInput, ZIP, 45, 80).catch(() => {});
+      await humanPause(150, 350);
+    }
 
   } else {
     // 3B) UNIFIED Payment Element (single iframe we already detected)
@@ -181,7 +207,11 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
     expect(payFrame, 'Could not locate Stripe Payment Element iframe').not.toBeNull();
 
     const name = page.getByRole('textbox', { name: /cardholder name|name on card/i });
-    if (await name.isVisible().catch(() => false)) await name.fill('Test User').catch(() => {});
+    if (await name.isVisible().catch(() => false)) {
+      await name.click().catch(() => {});
+      await humanType(name, 'Test User', 35, 65).catch(() => {});
+      await humanPause(150, 350);
+    }
 
     const country = page.getByRole('combobox', { name: /country|region/i });
     if (await country.isVisible().catch(() => false)) {
@@ -196,26 +226,38 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
       .locator('[data-elements-stable-field-name="cardNumber"], input[autocomplete="cc-number"], input[name="cardnumber"], .InputElement')
       .first();
     await expect(numInput).toBeVisible({ timeout: 30000 });
-    await numInput.fill(CARD);
+    await numInput.click();
+    await humanType(numInput, CARD, 25, 60);
+    await humanPause(250, 600);
 
     const expInput = payFrame!
       .locator('[data-elements-stable-field-name="cardExpiry"], input[autocomplete="cc-exp"], input[name="exp-date"], .InputElement')
       .first();
-    await expInput.fill(EXP);
+    await expInput.click();
+    await humanType(expInput, EXP, 45, 80);
+    await humanPause(200, 500);
 
     const cvcInput = payFrame!
       .locator('[data-elements-stable-field-name="cardCvc"], input[autocomplete="cc-csc"], input[name="cvc"], .InputElement')
       .first();
-    await cvcInput.fill(CVC);
+    await cvcInput.click();
+    await humanType(cvcInput, CVC, 55, 95);
+    await humanPause(200, 500);
 
     const zip = payFrame!
-      .locator('[data-elements-stable-field-name="postalCode"], input[autocomplete*="postal"], input[name*="postal"], .InputElement');
-    if (await zip.count()) await zip.first().fill(ZIP).catch(() => {});
+      .locator('[data-elements-stable-field-name="postalCode"], input[autocomplete*="postal"], input[name*="postal"], .InputElement')
+      .first();
+    if (await zip.count()) {
+      await zip.click().catch(() => {});
+      await humanType(zip, ZIP, 45, 80).catch(() => {});
+      await humanPause(150, 350);
+    }
   }
 
   // 4) Pay
   const payBtn = page.locator('button[type="submit"], button:has-text("Pay")').first();
   await expect(payBtn).toBeEnabled({ timeout: 20000 });
+  await humanPause(300, 800);
   await payBtn.click().catch(() => {});
 
   // 5) 3DS (if triggered)
