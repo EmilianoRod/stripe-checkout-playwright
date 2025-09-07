@@ -16,10 +16,11 @@ const SLOWMO = process.env.PW_SLOWMO ? Number(process.env.PW_SLOWMO) : 0;
 const STORAGE_STATE = process.env.PW_STORAGE_STATE || 'test-results/storage/state.json';
 
 // Timeouts (env overrides)
-const TEST_TIMEOUT   = process.env.PW_TIMEOUT_MS        ? Number(process.env.PW_TIMEOUT_MS)        : 180_000;
-const EXPECT_TIMEOUT = process.env.PW_EXPECT_TIMEOUT_MS ? Number(process.env.PW_EXPECT_TIMEOUT_MS) : 10_000;
-const NAV_TIMEOUT    = process.env.PW_NAV_TIMEOUT_MS    ? Number(process.env.PW_NAV_TIMEOUT_MS)    : 60_000;
-const ACTION_TIMEOUT = process.env.PW_ACTION_TIMEOUT_MS ? Number(process.env.PW_ACTION_TIMEOUT_MS) : 0;
+// Fast-fail defaults (env can override)
+const TEST_TIMEOUT   = Number(process.env.PW_TIMEOUT_MS        ?? 60_000);
+const EXPECT_TIMEOUT = Number(process.env.PW_EXPECT_TIMEOUT_MS ?? 5_000);
+const NAV_TIMEOUT    = Number(process.env.PW_NAV_TIMEOUT_MS    ?? 15_000);
+const ACTION_TIMEOUT = Number(process.env.PW_ACTION_TIMEOUT_MS ?? 15_000);
 
 // Locale / timezone
 const TIMEZONE = process.env.PW_TZ     || 'America/New_York';
