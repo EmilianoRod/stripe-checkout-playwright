@@ -16,32 +16,57 @@ fi
 # Work from this script's directory (repo root for PW)
 cd "$(dirname "$0")"
 
-echo "[PW] node version: $(node -v)"
-echo "[PW] npm version : $(npm -v)"
+echo "[PW] node version: $(node -v 2>/dev/null || echo 'not found')"
+echo "[PW] npm version : $(npm -v 2>/dev/null || echo 'not found')"
+
+# ---- Early runtime guards ----
+REQUIRED_NODE_MAJOR=18
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+if [ "$NODE_MAJOR" -lt "$REQUIRED_NODE_MAJOR" ]; then
+  echo "[PW] ERROR: Node >= ${REQUIRED_NODE_MAJOR} required. Found: $(node -v 2>/dev/null || echo none)"
+  exit 2
+fi
 
 # ---- Ensure dependencies & browsers (skip with PW_SKIP_INSTALL=1) ----
 if [ "${PW_SKIP_INSTALL:-0}" != "1" ]; then
-  if [ ! -d node_modules ] || [ ! -x node_modules/.bin/playwright ]; then
+  # Prefer npm ci, but fall back if lockfile is missing/old
+  if [ -f package-lock.json ]; then
     echo "[PW] Installing node modules (npm ci)…"
-    npm ci
+    if ! npm ci; then
+      echo "[PW] npm ci failed; falling back to 'npm install'…"
+      npm install
+    fi
+  else
+    echo "[PW] No package-lock.json; using 'npm install'…"
+    npm install
   fi
 
-  if ! ./node_modules/.bin/playwright --version >/dev/null 2>&1; then
-    echo "[PW] Installing Playwright browsers…"
-    npx playwright install --with-deps
+  # Use the project's local Playwright CLI (avoid npx global drift)
+  if [ -x ./node_modules/.bin/playwright ]; then
+    # Install browsers; add --with-deps only when we're root and apt-get exists
+    if command -v apt-get >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then
+      echo "[PW] Installing Playwright browsers (+deps)…"
+      ./node_modules/.bin/playwright install --with-deps || ./node_modules/.bin/playwright install
+    else
+      echo "[PW] Installing Playwright browsers…"
+      ./node_modules/.bin/playwright install
+    fi
+  else
+    echo "[PW] ERROR: Playwright CLI not found after npm install."
+    echo "[PW] Hint: ensure devDependencies includes '@playwright/test' or 'playwright'."
+    exit 1
   fi
 fi
 
 # ---- Extra CLI flags from env ----
-# ---- Extra CLI flags from env ----
 EXTRA_ARGS=()
 if [ "${1:-}" = "test" ]; then
   # Fail fast unless explicitly overridden
-  [ -n "${PW_RETRIES:-}" ]   && EXTRA_ARGS+=( "--retries=${PW_RETRIES}" )
+  [ -n "${PW_RETRIES:-}" ]    && EXTRA_ARGS+=( "--retries=${PW_RETRIES}" )
   # Optional per-test timeout in ms
   [ -n "${PW_TIMEOUT_MS:-}" ] && EXTRA_ARGS+=( "--timeout=${PW_TIMEOUT_MS}" )
 
-  # Only add --channel if this Playwright version supports it (older CI won't)
+  # Add --channel only if supported by this PW version
   if [ -n "${PW_CHANNEL:-}" ] && ./node_modules/.bin/playwright test -h 2>&1 | grep -q -- '--channel'; then
     EXTRA_ARGS+=( "--channel=${PW_CHANNEL}" )
   elif [ -n "${PW_CHANNEL:-}" ]; then
@@ -53,7 +78,6 @@ else
     EXTRA_ARGS+=( "--channel=${PW_CHANNEL}" )
   fi
 fi
-
 
 # ---- Run using the local CLI ----
 if [ -x node_modules/.bin/playwright ]; then
