@@ -4,7 +4,7 @@ import { humanType, humanPause } from '../helpers/human';
 // === small helpers (minimal changes) ===
 const SUCCESS_MARK = 'PW_BRIDGE::SUCCESS_URL ';
 const CI = !!process.env.CI;
-const FAKE_SUCCESS = process.env.PW_STRIPE_FAKE_SUCCESS === '1';
+const FAKE_SUCCESS = process.env.PW_STRIPE_FAKE_SUCCESS === '1'; // only honored when !CI
 
 // Give CI more time (env overrides)
 const TEST_TIMEOUT = parseInt(process.env.PW_TIMEOUT_MS || (CI ? '180000' : '120000'), 10);
@@ -18,7 +18,10 @@ async function safePause(page: Page, ms: number) {
 
 async function maybeAnnounceSuccess(page: Page): Promise<boolean> {
   const u = page.url();
-  if (/success|thank|return|redirect_status=succeeded|checkout_session_id/.test(u)) {
+  // Only announce if we **left** checkout.stripe.com OR we landed on a clear success/return/receipt on merchant domain.
+  const leftStripeCheckout = !/checkout\.stripe\.com/i.test(u);
+  const hasSuccessTokens = /success|thank|return|receipt|redirect_status=succeeded|checkout_session_id/i.test(u);
+  if (leftStripeCheckout || hasSuccessTokens) {
     console.log(SUCCESS_MARK + u);
     return true;
   }
@@ -73,8 +76,6 @@ const TEST_EMAIL   = process.env.CHECKOUT_EMAIL ?? 'qa+stripe@example.com';
 
 // 4242 path (no 3DS)
 const CARD = '4242424242424242';
-// For unified element, "12/34" is fine; for split element, many UIs accept 0134 too.
-// We will type with humanType so either format is OK; keep '12/34' for realism.
 const EXP  = '12/34';
 const CVC  = '123';
 const ZIP  = '90210';
@@ -104,7 +105,6 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
   // 0) Email (required in Stripe Checkout)
   const email = page.getByRole('textbox', { name: /email/i });
   await expect(email).toBeVisible({ timeout: 20000 });
-  // Type with a short delay instead of instant fill
   await email.click();
   await humanType(email, TEST_EMAIL, 40, 75);
   await email.blur();
@@ -117,21 +117,26 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
   // If PE didn't render, see whether hCaptcha is present and handle accordingly
   if (!mode) {
     if (await isHcaptchaPresent(page)) {
-      console.warn('[PW] hCaptcha detected and Payment Element did not render.');
+      // ⛔ In CI we *fail hard*. No fake-success allowed.
+      if (CI) {
+        throw new Error('Stripe hCaptcha present; Payment Element did not render. Failing CI run.');
+      }
+      // Allow local devs to bypass if explicitly opted-in (FAKE_SUCCESS=1)
       if (FAKE_SUCCESS) {
-        console.log(`${SUCCESS_MARK}${page.url()}?redirect_status=succeeded#bypass=ci`);
+        const u = page.url();
+        const bypass = u.includes('redirect_status=succeeded') ? u : `${u}?redirect_status=succeeded#bypass=ci`;
+        console.warn('[PW] hCaptcha detected; FAKE_SUCCESS enabled locally. Emitting synthetic success URL.');
+        console.log(`${SUCCESS_MARK}${bypass}`);
         return;
       }
-      // Hard error (so Java sees a non-zero exit) instead of marking "expected fail"
-      throw new Error('Stripe presented hCaptcha on this run and blocked the Payment Element. ' +
-        'Run headed with real-user signals, allowlist the CI IP in Stripe test mode, or contact Stripe Support about test-mode CAPTCHA.');
+      throw new Error('Stripe presented hCaptcha and blocked the Payment Element.');
     }
 
     // No hCaptcha, just failed to render PE ⇒ normal assertion
     expect(mode, 'Stripe Payment Element did not render in time (check network/CDN access)').not.toBeNull();
   }
 
-  // 2) Tap "Pay with card" tab if present, but don’t die if page was closed meanwhile
+  // 2) Tap "Pay with card" tab if present
   const cardTab = page.locator(
     '[data-testid="card-tab"], [role="tab"][data-testid*="card"], ' +
     'button[aria-controls*="card"], button[aria-label*="card" i], ' +
@@ -149,7 +154,6 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
     const cvcFrame    = page.frameLocator('iframe[title="Secure CVC input"]').first();
     const zipFrame    = page.frameLocator('iframe[title="Secure postal code input"]').first();
 
-    // Optional outside-the-iframe fields
     const name = page.getByRole('textbox', { name: /cardholder name|name on card/i });
     if (await name.isVisible().catch(() => false)) {
       await name.click().catch(() => {});
@@ -266,9 +270,13 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
   // 6) Wait to leave Stripe checkout or reach a success URL
   const leftCheckout = await page
     .waitForURL(
-      url =>
-        /success|thank|return|receipt/i.test(url.toString()) ||
-        !/checkout\.stripe\.com/i.test(url.toString()),
+      url => {
+        const s = url.toString();
+        return (
+          !/checkout\.stripe\.com/i.test(s) ||
+          /success|thank|return|receipt|redirect_status=succeeded|checkout_session_id/i.test(s)
+        );
+      },
       { timeout: CI ? 30000 : 20000 }
     )
     .then(() => true)
@@ -276,7 +284,8 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
 
   expect(leftCheckout, 'Did not reach a success/return URL from Stripe Checkout').toBeTruthy();
 
-  console.log(`PW_BRIDGE::SUCCESS_URL ${page.url()}`);
+  // Only announce success if we truly left Stripe Checkout domain OR got explicit success tokens.
+  await maybeAnnounceSuccess(page);
 
   // ---- helpers (unchanged except for tiny robustness) ----
   async function handle3DSChallenge(page: Page): Promise<void> {
