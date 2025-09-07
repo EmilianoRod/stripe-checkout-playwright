@@ -5,67 +5,72 @@ const CI = !!process.env.CI;
 export default defineConfig({
   testDir: './tests',
 
-  // Safety in CI
+  // CI hygiene
   forbidOnly: CI,
-  retries: CI ? 0 : 0,                 // keep fast iterations; raise if you want auto-retry
   workers: CI ? 1 : undefined,
+  retries: CI ? 0 : 0,
 
-  // Where Playwright will put traces/screenshots/videos (Jenkins archives this)
+  // Where artifacts go (Jenkins archives this)
   outputDir: 'test-results',
 
-  // Reporters: keep console line + HTML (don’t try to open it in CI)
+  // Reporters
   reporter: [
     ['line'],
     ['html', { open: 'never', outputFolder: 'playwright-report' }],
   ],
 
-  // Global timeouts
-  // PW_TIMEOUT_MS (milliseconds) can override from env (Jenkins sets it easily)
+  // Global timeouts (env overrides for CI)
   timeout: process.env.PW_TIMEOUT_MS ? Number(process.env.PW_TIMEOUT_MS) : 30_000,
-
-  use: {
-    // Default to headless in CI; if you export PWDEBUG=1, it’ll run headed
-    headless: CI && process.env.PWDEBUG !== '1',
-
-    // Useful in Docker / root environments
-    launchOptions: {
-      args: ['--no-sandbox', '--disable-dev-shm-usage'],
-    },
-
-    // Optional, if your tests use it
-    baseURL: process.env.BASE_URL || undefined,
-
-    // Artifacts
-    trace: CI ? 'on' : 'retain-on-failure',
-    video: 'retain-on-failure',
-    screenshot: 'only-on-failure',
+  expect: {
+    timeout: process.env.PW_EXPECT_TIMEOUT_MS ? Number(process.env.PW_EXPECT_TIMEOUT_MS) : 10_000,
   },
 
-  // Projects
+  use: {
+    // Always headless on CI unless PWDEBUG=1
+    headless: process.env.PWDEBUG === '1' ? false : true,
+
+    baseURL: process.env.BASE_URL || undefined,
+
+    // More generous navigation, unlimited actions unless overridden
+    navigationTimeout: process.env.PW_NAV_TIMEOUT_MS ? Number(process.env.PW_NAV_TIMEOUT_MS) : 60_000,
+    actionTimeout: process.env.PW_ACTION_TIMEOUT_MS ? Number(process.env.PW_ACTION_TIMEOUT_MS) : 0,
+
+    // Keep artifacts for debugging failures
+    trace: CI ? 'retain-on-failure' : 'retain-on-failure',
+    video: 'retain-on-failure',
+    screenshot: 'only-on-failure',
+
+    // Stable in Docker/rooted CI
+    launchOptions: {
+      // Do NOT set channel on CI; Chromium bundled by Playwright is used.
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-zygote',
+        '--single-process',
+      ],
+    },
+  },
+
   projects: [
-    // Primary target for CI and your bridge
+    // Primary target used by Jenkins (--project=chromium)
     {
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
     },
 
-    // Only expose Google Chrome locally (channel requires Chrome installed
-    // and can be problematic on CI / older PW)
+    // Extra browsers only for local runs (not CI)
     ...(!CI
-      ? [{
-          name: 'Google Chrome',
-          use: { ...devices['Desktop Chrome'], channel: 'chrome' },
-        }]
+      ? [
+          {
+            name: 'Google Chrome',
+            use: { ...devices['Desktop Chrome'], channel: 'chrome' },
+          },
+          { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
+          { name: 'webkit', use: { ...devices['Desktop Safari'] } },
+        ]
       : []),
-
-    // Keep these if you run them locally; your Jenkins job passes --project=chromium anyway
-    {
-      name: 'firefox',
-      use: { ...devices['Desktop Firefox'] },
-    },
-    {
-      name: 'webkit',
-      use: { ...devices['Desktop Safari'] },
-    },
   ],
 });
