@@ -1,87 +1,71 @@
 import { defineConfig, devices } from '@playwright/test';
 
-/**
- * Read environment variables from file.
- * https://github.com/motdotla/dotenv
- */
-// import dotenv from 'dotenv';
-// import path from 'path';
-// dotenv.config({ path: path.resolve(__dirname, '.env') });
+const CI = !!process.env.CI;
 
-/**
- * See https://playwright.dev/docs/test-configuration.
- */
 export default defineConfig({
   testDir: './tests',
-  /* Run tests in files in parallel */
-  fullyParallel: true,
-  /* Fail the build on CI if you accidentally left test.only in the source code. */
-  forbidOnly: !!process.env.CI,
-  /* Retry on CI only */
-  retries: process.env.CI ? 2 : 0,
-  /* Opt out of parallel tests on CI. */
-  workers: process.env.CI ? 1 : undefined,
-  /* Reporter to use. See https://playwright.dev/docs/test-reporters */
-  reporter: 'html',
-  /* Shared settings for all the projects below. See https://playwright.dev/docs/api/class-testoptions. */
-  use: {
-    /* Base URL to use in actions like `await page.goto('/')`. */
-    // baseURL: 'http://localhost:3000',
 
-    /* Collect trace when retrying the failed test. See https://playwright.dev/docs/trace-viewer */
-    trace: 'on-first-retry',
+  // Safety in CI
+  forbidOnly: CI,
+  retries: CI ? 0 : 0,                 // keep fast iterations; raise if you want auto-retry
+  workers: CI ? 1 : undefined,
+
+  // Where Playwright will put traces/screenshots/videos (Jenkins archives this)
+  outputDir: 'test-results',
+
+  // Reporters: keep console line + HTML (don’t try to open it in CI)
+  reporter: [
+    ['line'],
+    ['html', { open: 'never', outputFolder: 'playwright-report' }],
+  ],
+
+  // Global timeouts
+  // PW_TIMEOUT_MS (milliseconds) can override from env (Jenkins sets it easily)
+  timeout: process.env.PW_TIMEOUT_MS ? Number(process.env.PW_TIMEOUT_MS) : 30_000,
+
+  use: {
+    // Default to headless in CI; if you export PWDEBUG=1, it’ll run headed
+    headless: CI && process.env.PWDEBUG !== '1',
+
+    // Useful in Docker / root environments
+    launchOptions: {
+      args: ['--no-sandbox', '--disable-dev-shm-usage'],
+    },
+
+    // Optional, if your tests use it
+    baseURL: process.env.BASE_URL || undefined,
+
+    // Artifacts
+    trace: CI ? 'on' : 'retain-on-failure',
+    video: 'retain-on-failure',
+    screenshot: 'only-on-failure',
   },
 
-  /* Configure projects for major browsers */
+  // Projects
   projects: [
-
-        { 
-          name: 'Google Chrome', 
-          use: { ...devices['Desktop Chrome'], 
-            channel: 'chrome' }
-           },
-
-
+    // Primary target for CI and your bridge
     {
       name: 'chromium',
       use: { ...devices['Desktop Chrome'] },
     },
 
+    // Only expose Google Chrome locally (channel requires Chrome installed
+    // and can be problematic on CI / older PW)
+    ...(!CI
+      ? [{
+          name: 'Google Chrome',
+          use: { ...devices['Desktop Chrome'], channel: 'chrome' },
+        }]
+      : []),
+
+    // Keep these if you run them locally; your Jenkins job passes --project=chromium anyway
     {
       name: 'firefox',
       use: { ...devices['Desktop Firefox'] },
     },
-
     {
       name: 'webkit',
       use: { ...devices['Desktop Safari'] },
     },
-
-    /* Test against mobile viewports. */
-    // {
-    //   name: 'Mobile Chrome',
-    //   use: { ...devices['Pixel 5'] },
-    // },
-    // {
-    //   name: 'Mobile Safari',
-    //   use: { ...devices['iPhone 12'] },
-    // },
-
-    /* Test against branded browsers. */
-    // {
-    //   name: 'Microsoft Edge',
-    //   use: { ...devices['Desktop Edge'], channel: 'msedge' },
-    // },
-    // {
-    //   name: 'Google Chrome',
-    //   use: { ...devices['Desktop Chrome'], channel: 'chrome' },
-    // },
   ],
-
-  /* Run your local dev server before starting the tests */
-  // webServer: {
-  //   command: 'npm run start',
-  //   url: 'http://localhost:3000',
-  //   reuseExistingServer: !process.env.CI,
-  // },
 });
