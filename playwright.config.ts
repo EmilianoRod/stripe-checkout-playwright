@@ -14,7 +14,7 @@ const SLOWMO = process.env.PW_SLOWMO ? Number(process.env.PW_SLOWMO) : 0;
 
 // Persisted storage — use env if provided, else default inside repo
 const STORAGE_STATE = process.env.PW_STORAGE_STATE || 'test-results/storage/state.json';
-git add
+
 // Timeouts (env overrides)
 const TEST_TIMEOUT   = process.env.PW_TIMEOUT_MS        ? Number(process.env.PW_TIMEOUT_MS)        : 180_000;
 const EXPECT_TIMEOUT = process.env.PW_EXPECT_TIMEOUT_MS ? Number(process.env.PW_EXPECT_TIMEOUT_MS) : 10_000;
