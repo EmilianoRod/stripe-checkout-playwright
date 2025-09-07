@@ -1,19 +1,24 @@
 {
   "name": "stripe-checkout-playwright",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {},
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "private": true,
+  "description": "Playwright tests for Stripe Checkout",
   "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "playwright test",
+    "test:chrome": "playwright test --project=chrome",
+    "report": "playwright show-report",
+    "show-trace": "playwright show-trace",
+    "postinstall": "playwright install --with-deps"
+  },
   "devDependencies": {
-    "@playwright/test": "^1.54.2",
-    "@types/node": "^24.2.1",
-    "playwright": "^1.47.2"
+    "@playwright/test": "^1.55.0",
+    "@types/node": "^24.3.1"
   },
   "dependencies": {
-    "stripe": "^18.4.0"
+    "stripe": "^18.5.0"
   }
 }
