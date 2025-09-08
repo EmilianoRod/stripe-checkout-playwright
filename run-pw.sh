@@ -27,7 +27,7 @@ echo "[PW] npm  version: $(npm -v 2>/dev/null || echo 'not found')"
 # ---- Early runtime guards ----
 REQUIRED_NODE_MAJOR=18
 NODE_MAJOR="$(
-  (node -p 'process.versions.node.split(".")[0]' 2>/dev/null) \
+  (node -p 'process.versions.node.split(\".\")[0]' 2>/dev/null) \
   || (node -v 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/') \
   || echo 0
 )"
@@ -40,32 +40,88 @@ fi
 
 # ---- Caching & install knobs ----
 # Cache Playwright browsers between runs (keeps the exact versions PW wants)
-export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/var/lib/jenkins/.cache/ms-playwright}"
+# Local default goes to a user-writable cache; CI can override to a shared path.
+if [ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
+  if [ "${CI:-}" = "1" ]; then
+    export PLAYWRIGHT_BROWSERS_PATH="/root/.cache/ms-playwright"
+  else
+    export PLAYWRIGHT_BROWSERS_PATH="${HOME}/.cache/ms-playwright"
+  fi
+fi
 
 # Optionally skip installs (e.g., on a pre-baked container)
 PW_SKIP_INSTALL="${PW_SKIP_INSTALL:-0}"
 
+# Which browsers to install? Default to chromium-only (avoids macOS 12 WebKit).
+# Set PW_INSTALL_BROWSERS=all if you want everything (chromium firefox webkit).
+PW_INSTALL_BROWSERS="${PW_INSTALL_BROWSERS:-chromium}"
+
 # ---- Ensure dependencies & browsers ----
 if [ "$PW_SKIP_INSTALL" != "1" ]; then
   if [ -f package-lock.json ]; then
-    echo "[PW] Installing node modules (npm ci)…"
-    # Faster, quieter installs suitable for CI
-    npm ci --prefer-offline --no-audit --fund=false || (echo "[PW] npm ci failed; falling back to 'npm install'…" && npm install --no-audit --fund=false)
+    echo "[PW] Installing node modules (npm ci --ignore-scripts)…"
+    npm ci --ignore-scripts --prefer-offline --no-audit --fund=false \
+      || (echo "[PW] npm ci failed; falling back to 'npm install --ignore-scripts'…" \
+      && npm install --ignore-scripts --no-audit --fund=false)
   else
-    echo "[PW] No package-lock.json; using 'npm install'…"
-    npm install --no-audit --fund=false
+    echo "[PW] No package-lock.json; using 'npm install --ignore-scripts'…"
+    npm install --ignore-scripts --no-audit --fund=false
   fi
 
   if [ -x ./node_modules/.bin/playwright ]; then
-    # Install PW browsers if they aren't already in cache
-    if [ ! -d "$PLAYWRIGHT_BROWSERS_PATH" ] || [ -z "$(ls -A "$PLAYWRIGHT_BROWSERS_PATH" 2>/dev/null)" ]; then
-      echo "[PW] Installing Playwright browsers (first-time)…"
-      ./node_modules/.bin/playwright install
+    # Decide set to install (we’ll add ffmpeg below if needed)
+    if [ "${PW_INSTALL_BROWSERS}" = "all" ]; then
+      INSTALL_SET=(chromium firefox webkit)
     else
-      echo "[PW] Reusing cached Playwright browsers at: $PLAYWRIGHT_BROWSERS_PATH"
+      INSTALL_SET=(chromium)
     fi
 
-    # OS deps: do it ONLY on bootstrap; not every build (avoid bot-scent + time)
+    # If cache already has chromium, skip reinstall to save time.
+    have_chromium="$(ls -d "${PLAYWRIGHT_BROWSERS_PATH}"/chromium-* 2>/dev/null | head -n1 || true)"
+    if [ -n "${have_chromium}" ]; then
+      echo "[PW] Reusing cached Chromium at: ${have_chromium}"
+      # Properly filter the array WITHOUT leaving empty elements
+      declare -a filtered=()
+      for b in "${INSTALL_SET[@]}"; do
+        if [ "$b" != "chromium" ] && [ -n "$b" ]; then
+          filtered+=("$b")
+        fi
+      done
+      # macOS Bash 3.2: guard empty array under `set -u`
+      if [ "${#filtered[@]:-0}" -gt 0 ]; then
+        INSTALL_SET=("${filtered[@]}")
+      else
+        INSTALL_SET=()
+      fi
+    fi
+
+    # --- ensure ffmpeg is present (needed for video/trace on macOS too) ---
+    have_ffmpeg="$(ls -d "${PLAYWRIGHT_BROWSERS_PATH}"/ffmpeg_* 2>/dev/null | head -n1 || true)"
+    if [ -z "${have_ffmpeg}" ]; then
+      echo "[PW] Playwright ffmpeg not found in cache — will install ffmpeg"
+      INSTALL_SET+=("ffmpeg")
+    fi
+    # ---------------------------------------------------------------------
+
+    # Linux root/CI → allow --with-deps; elsewhere, plain install to avoid EACCES/frozen webkit
+    if command -v apt-get >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then
+      if [ "${#INSTALL_SET[@]}" -gt 0 ]; then
+        echo "[PW] Installing Playwright browsers (+deps): ${INSTALL_SET[*]} …"
+        ./node_modules/.bin/playwright install --with-deps "${INSTALL_SET[@]}" \
+          || ./node_modules/.bin/playwright install "${INSTALL_SET[@]}"
+      else
+        echo "[PW] All required components present in cache."
+      fi
+    else
+      if [ "${#INSTALL_SET[@]}" -gt 0 ]; then
+        echo "[PW] Installing Playwright components: ${INSTALL_SET[*]} …"
+        ./node_modules/.bin/playwright install "${INSTALL_SET[@]}"
+      else
+        echo "[PW] All required components present in cache."
+      fi
+    fi
+
+    # Optional OS deps bootstrap: only when explicitly requested
     if command -v apt-get >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then
       if [ "${PW_BOOTSTRAP_DEPS:-0}" = "1" ]; then
         echo "[PW] Installing system deps for PW (bootstrap)…"
@@ -81,7 +137,7 @@ fi
 
 # ---- Defaults that look like a real user (read by playwright.config.ts) ----
 export PW_CHANNEL="${PW_CHANNEL:-chrome}"        # config uses it; we don't pass --channel here
-export PW_SLOWMO="${PW_SLOWMO:-10}"             # tiny human-ish pacing in CI helps
+export PW_SLOWMO="${PW_SLOWMO:-10}"              # tiny human-ish pacing in CI helps
 # Headed by default unless explicitly forced off
 _headless_raw="${PW_HEADLESS:-false}"
 case "$(printf '%s' "$_headless_raw" | tr '[:upper:]' '[:lower:]')" in
@@ -153,6 +209,7 @@ echo "[PW] CHECKOUT_URL=${CHECKOUT_URL:-<unset>}"
 echo "[PW] PW_STORAGE_STATE=${PW_STORAGE_STATE:-<unset>} $( [ -n "${PW_STORAGE_STATE:-}" ] && [ -f "${PW_STORAGE_STATE}" ] && echo '[exists]' || true )"
 echo "[PW] CHROME_PATH=${CHROME_PATH:-<unset>}"
 echo "[PW] PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH}"
+echo "[PW] PW_INSTALL_BROWSERS=${PW_INSTALL_BROWSERS}"
 
 echo "[PW] Command: ${run_cmd[*]}"
 if $use_xvfb; then
