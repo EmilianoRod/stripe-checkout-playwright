@@ -27,7 +27,7 @@ echo "[PW] npm  version: $(npm -v 2>/dev/null || echo 'not found')"
 # ---- Early runtime guards ----
 REQUIRED_NODE_MAJOR=18
 NODE_MAJOR="$(
-  (node -p 'process.versions.node.split(\".\")[0]' 2>/dev/null) \
+  (node -p 'process.versions.node.split(".")[0]' 2>/dev/null) \
   || (node -v 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/') \
   || echo 0
 )"
@@ -87,8 +87,8 @@ if [ "$PW_SKIP_INSTALL" != "1" ]; then
           filtered+=("$b")
         fi
       done
-      # macOS Bash 3.2: guard empty array under `set -u`
-      if [ "${#filtered[@]:-0}" -gt 0 ]; then
+      # macOS/Linux bash: simple, safe length check
+      if [ "${#filtered[@]}" -gt 0 ]; then
         INSTALL_SET=("${filtered[@]}")
       else
         INSTALL_SET=()
