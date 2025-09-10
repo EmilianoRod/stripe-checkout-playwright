@@ -1,4 +1,4 @@
-import { Page, expect, test } from '@playwright/test';
+import { Page, expect, test, FrameLocator } from '@playwright/test';
 import { humanType, humanPause } from '../helpers/human';
 
 // === small helpers / constants ===
@@ -60,23 +60,60 @@ async function isHcaptchaPresent(page: Page): Promise<boolean> {
   return !!(await page.$(sel));
 }
 
-// Wait (generously) until split or unified Payment Element is discoverable.
-async function waitForStripePaymentElement(page: Page, totalMs = CI ? 60000 : 30000): Promise<'split'|'unified'|null> {
+/**
+ * Click the “card” path if present (Stripe often shows wallets first).
+ * This is required before Stripe injects the card iframe on some layouts.
+ */
+async function chooseCardPath(page: Page): Promise<void> {
+  const candidates = page.locator(
+    [
+      'button:has-text("Pay with card")',
+      '[data-testid="card-tab"]',
+      '[role="tab"][data-testid*="card"]',
+      'button[aria-controls*="card"]',
+      'button[aria-label*="card" i]',
+      'button:has-text(/^Card$/i)',
+    ].join(', ')
+  );
+  if (await candidates.count()) {
+    await candidates.first().click({ trial: false }).catch(() => {});
+    await safePause(page, 500);
+  }
+}
+
+/**
+ * Wait until Payment Element (split or unified) is discoverable.
+ * Returns mode and a frame handle/locator you can use to type card data.
+ */
+async function getPaymentTargets(page: Page, totalMs = CI ? 90000 : 45000)
+: Promise<{ mode: 'split'|'unified', num?: FrameLocator, exp?: FrameLocator, cvc?: FrameLocator, zip?: FrameLocator, unified?: FrameLocator } | null> {
+
   const start = Date.now();
   while (Date.now() - start < totalMs) {
-    const hasNumber = await page.locator('iframe[title="Secure card number input"]').first().count();
-    if (hasNumber > 0) return 'split';
-
-    for (const f of page.frames()) {
-      try {
-        const seenUnified = await f.evaluate(() => !!document.querySelector(
-          '[data-elements-stable-field-name="cardNumber"], input[autocomplete="cc-number"], input[name="cardnumber"], .InputElement'
-        ));
-        if (seenUnified) return 'unified';
-      } catch { /* cross-origin */ }
+    // Split: distinct iframes with title=Secure ...
+    const splitNum = page.frameLocator('iframe[title="Secure card number input"]').first();
+    if (await splitNum.count()) {
+      const splitExp = page.frameLocator('iframe[title="Secure expiration date input"]').first();
+      const splitCvc = page.frameLocator('iframe[title="Secure CVC input"]').first();
+      const splitZip = page.frameLocator('iframe[title="Secure postal code input"]').first();
+      return { mode: 'split', num: splitNum, exp: splitExp, cvc: splitCvc, zip: splitZip };
     }
-    await safePause(page, 300);
+
+    // Unified: one iframe like .../elements-inner-... containing cardNumber/Expiry/CVC
+    const unifiedFrame = page.frameLocator('iframe[src*="elements-inner"]');
+    if (await unifiedFrame.count()) {
+      // Make sure fields have mounted inside
+      const maybeNum = unifiedFrame.locator(
+        '[data-elements-stable-field-name="cardNumber"], input[autocomplete="cc-number"], input[name="cardnumber"], .InputElement'
+      ).first();
+      if (await maybeNum.isVisible({ timeout: 4000 }).catch(() => false)) {
+        return { mode: 'unified', unified: unifiedFrame };
+      }
+    }
+
+    await safePause(page, 250);
   }
+
   // one-shot dump of frames for debugging
   console.log('[PW] Stripe frames not detected in time. Frames seen:', page.frames().map(f => f.url()));
   return null;
@@ -163,45 +200,37 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
   await humanPause(300, 700);
   await email.press('Enter').catch(() => {}); // nudges PE render
 
-  // 1) Wait until Stripe Payment Element is ready
-  const mode = await waitForStripePaymentElement(page, CI ? 90000 : 45000);
+  // 1) Always pick the **card** path first (so Stripe mounts the card iframe)
+  await chooseCardPath(page); // Pay-with-card button/tab exists on this layout. :contentReference[oaicite:0]{index=0}
 
-  // If PE didn't render, see whether hCaptcha is present and handle accordingly
-  if (!mode) {
-    if (await isHcaptchaPresent(page)) {
-      if (CI) {
+  // 2) Wait until Stripe Payment Element is ready
+  let targets = await getPaymentTargets(page, CI ? 90000 : 45000);
+
+  // If PE didn't render, check hCaptcha and try clicking card again once before failing
+  if (!targets) {
+    const hadCaptcha = await isHcaptchaPresent(page);
+    if (hadCaptcha) {
+      await chooseCardPath(page);
+      targets = await getPaymentTargets(page, 12000); // short re-wait
+      if (!targets && CI) {
         throw new Error('Stripe hCaptcha present; Payment Element did not render. Failing CI run.');
       }
-      if (FAKE_SUCCESS) {
+      if (!targets && !CI && FAKE_SUCCESS) {
         const u = page.url();
         const bypass = u.includes('redirect_status=succeeded') ? u : `${u}?redirect_status=succeeded#bypass=ci`;
         console.warn('[PW] hCaptcha detected; FAKE_SUCCESS enabled locally. Emitting synthetic success URL.');
         console.log(`${SUCCESS_MARK}${bypass}`);
         return;
       }
-      throw new Error('Stripe presented hCaptcha and blocked the Payment Element.');
+      if (!targets) throw new Error('Stripe presented hCaptcha and blocked the Payment Element.');
+    } else {
+      expect(targets, 'Stripe Payment Element did not render in time (check network/CDN access)').not.toBeNull();
     }
-    expect(mode, 'Stripe Payment Element did not render in time (check network/CDN access)').not.toBeNull();
   }
 
-  // 2) Tap "Pay with card" tab if present
-  const cardTab = page.locator(
-    '[data-testid="card-tab"], [role="tab"][data-testid*="card"], ' +
-    'button[aria-controls*="card"], button[aria-label*="card" i], ' +
-    'button:has-text("Pay with card"), button:has-text("Card")'
-  );
-  if (await cardTab.count()) {
-    await cardTab.first().click().catch(() => {});
-    await safePause(page, 300);
-  }
-
-  if (mode === 'split') {
-    // 3A) SPLIT iframes
-    const numberFrame = page.frameLocator('iframe[title="Secure card number input"]').first();
-    const expFrame    = page.frameLocator('iframe[title="Secure expiration date input"]').first();
-    const cvcFrame    = page.frameLocator('iframe[title="Secure CVC input"]').first();
-    const zipFrame    = page.frameLocator('iframe[title="Secure postal code input"]').first();
-
+  // 3) Fill card
+  if (targets!.mode === 'split') {
+    const { num, exp, cvc, zip } = targets!;
     const name = page.getByRole('textbox', { name: /cardholder name|name on card/i }).first();
     if (await name.isVisible().catch(() => false)) {
       await name.click().catch(() => {});
@@ -218,46 +247,35 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
       }
     }
 
-    const numInput = numberFrame.locator('input[name="cardnumber"], input[autocomplete="cc-number"], .InputElement').first();
+    const numInput = num!.locator('input[name="cardnumber"], input[autocomplete="cc-number"], .InputElement').first();
     await expect(numInput).toBeVisible({ timeout: 30000 });
     await numInput.click();
     await humanType(numInput, CARD, 25, 60);
     await humanPause(250, 600);
 
-    const expInput = expFrame.locator('input[autocomplete="cc-exp"], input[name="exp-date"], .InputElement').first();
+    const expInput = exp!.locator('input[autocomplete="cc-exp"], input[name="exp-date"], .InputElement').first();
     await expect(expInput).toBeVisible({ timeout: 10000 });
     await expInput.click();
     await humanType(expInput, EXP, 45, 80);
     await humanPause(200, 500);
 
-    const cvcInput = cvcFrame.locator('input[autocomplete="cc-csc"], input[name="cvc"], .InputElement').first();
+    const cvcInput = cvc!.locator('input[autocomplete="cc-csc"], input[name="cvc"], .InputElement').first();
     await expect(cvcInput).toBeVisible({ timeout: 10000 });
     await cvcInput.click();
     await humanType(cvcInput, CVC, 55, 95);
     await humanPause(200, 500);
 
-    const zipInput = zipFrame.locator('input[autocomplete*="postal"], input[name*="postal"], .InputElement').first();
-    if (await zipInput.count()) {
-      await zipInput.click().catch(() => {});
-      await humanType(zipInput, ZIP, 45, 80).catch(() => {});
-      await humanPause(150, 350);
-    }
-
-  } else {
-    // 3B) UNIFIED Payment Element (single iframe)
-    const payFrame = await (async () => {
-      for (const f of page.frames()) {
-        try {
-          const ok = await f.evaluate(() => !!document.querySelector(
-            '[data-elements-stable-field-name="cardNumber"], input[autocomplete="cc-number"], input[name="cardnumber"], .InputElement'
-          ));
-          if (ok) return f;
-        } catch {}
+    if (zip && await zip.count()) {
+      const zipInput = zip.locator('input[autocomplete*="postal"], input[name*="postal"], .InputElement').first();
+      if (await zipInput.count()) {
+        await zipInput.click().catch(() => {});
+        await humanType(zipInput, ZIP, 45, 80).catch(() => {});
+        await humanPause(150, 350);
       }
-      return null;
-    })();
-    expect(payFrame, 'Could not locate Stripe Payment Element iframe').not.toBeNull();
-
+    }
+  } else {
+    // unified
+    const f = targets!.unified!;
     const name = page.getByRole('textbox', { name: /cardholder name|name on card/i }).first();
     if (await name.isVisible().catch(() => false)) {
       await name.click().catch(() => {});
@@ -274,31 +292,31 @@ test('Stripe hosted checkout – enter card and pay', async ({ page }) => {
       }
     }
 
-    const numInput = payFrame!
-      .locator('[data-elements-stable-field-name="cardNumber"], input[autocomplete="cc-number"], input[name="cardnumber"], .InputElement')
-      .first();
+    const numInput = f.locator(
+      '[data-elements-stable-field-name="cardNumber"], input[autocomplete="cc-number"], input[name="cardnumber"], .InputElement'
+    ).first();
     await expect(numInput).toBeVisible({ timeout: 30000 });
     await numInput.click();
     await humanType(numInput, CARD, 25, 60);
     await humanPause(250, 600);
 
-    const expInput = payFrame!
-      .locator('[data-elements-stable-field-name="cardExpiry"], input[autocomplete="cc-exp"], input[name="exp-date"], .InputElement')
-      .first();
+    const expInput = f.locator(
+      '[data-elements-stable-field-name="cardExpiry"], input[autocomplete="cc-exp"], input[name="exp-date"], .InputElement'
+    ).first();
     await expInput.click();
     await humanType(expInput, EXP, 45, 80);
     await humanPause(200, 500);
 
-    const cvcInput = payFrame!
-      .locator('[data-elements-stable-field-name="cardCvc"], input[autocomplete="cc-csc"], input[name="cvc"], .InputElement')
-      .first();
+    const cvcInput = f.locator(
+      '[data-elements-stable-field-name="cardCvc"], input[autocomplete="cc-csc"], input[name="cvc"], .InputElement'
+    ).first();
     await cvcInput.click();
     await humanType(cvcInput, CVC, 55, 95);
     await humanPause(200, 500);
 
-    const zip = payFrame!
-      .locator('[data-elements-stable-field-name="postalCode"], input[autocomplete*="postal"], input[name*="postal"], .InputElement')
-      .first();
+    const zip = f.locator(
+      '[data-elements-stable-field-name="postalCode"], input[autocomplete*="postal"], input[name*="postal"], .InputElement'
+    ).first();
     if (await zip.count()) {
       await zip.click().catch(() => {});
       await humanType(zip, ZIP, 45, 80).catch(() => {});
