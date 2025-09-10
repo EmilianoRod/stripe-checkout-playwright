@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Ensure arrays exist even if never appended (safe under set -u)
+declare -a EXTRA_ARGS=()
+
 # ==============================================================================
 # Playwright runner (headed-by-default; prefers real Google Chrome)
 # Anti-bot hygiene: real Chrome, coherent locale/TZ/UA, headed, slowMo a bit
@@ -26,21 +29,22 @@ echo "[PW] npm  version: $(npm -v 2>/dev/null || echo 'not found')"
 
 # ---- Early runtime guards ----
 REQUIRED_NODE_MAJOR=18
-NODE_MAJOR="$(
-  (node -p 'process.versions.node.split(".")[0]' 2>/dev/null) \
-  || (node -v 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/') \
-  || echo 0
-)"
-[[ "$NODE_MAJOR" =~ ^[0-9]+$ ]] || NODE_MAJOR=0
+# Try Node's own parser first; fall back to sed; finally 0
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+if ! [[ "${NODE_MAJOR}" =~ ^[0-9]+$ ]]; then
+  NODE_MAJOR="$(node -v 2>/dev/null | sed -E 's/^v([0-9]+).*/\1/' || true)"
+fi
+if ! [[ "${NODE_MAJOR}" =~ ^[0-9]+$ ]]; then
+  NODE_MAJOR=0
+fi
+
 echo "[PW] Node major: ${NODE_MAJOR} (need >= ${REQUIRED_NODE_MAJOR})"
-if [ "$NODE_MAJOR" -lt "$REQUIRED_NODE_MAJOR" ]; then
+if [ "${NODE_MAJOR}" -lt "${REQUIRED_NODE_MAJOR}" ]; then
   echo "[PW] ERROR: Node >= ${REQUIRED_NODE_MAJOR} required. Found: $(node -v 2>/dev/null || echo none)"
   exit 2
 fi
 
 # ---- Caching & install knobs ----
-# Cache Playwright browsers between runs (keeps the exact versions PW wants)
-# Local default goes to a user-writable cache; CI can override to a shared path.
 if [ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
   if [ "${CI:-}" = "1" ]; then
     export PLAYWRIGHT_BROWSERS_PATH="/root/.cache/ms-playwright"
@@ -49,11 +53,7 @@ if [ -z "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
   fi
 fi
 
-# Optionally skip installs (e.g., on a pre-baked container)
 PW_SKIP_INSTALL="${PW_SKIP_INSTALL:-0}"
-
-# Which browsers to install? Default to chromium-only (avoids macOS 12 WebKit).
-# Set PW_INSTALL_BROWSERS=all if you want everything (chromium firefox webkit).
 PW_INSTALL_BROWSERS="${PW_INSTALL_BROWSERS:-chromium}"
 
 # ---- Ensure dependencies & browsers ----
@@ -80,14 +80,12 @@ if [ "$PW_SKIP_INSTALL" != "1" ]; then
     have_chromium="$(ls -d "${PLAYWRIGHT_BROWSERS_PATH}"/chromium-* 2>/dev/null | head -n1 || true)"
     if [ -n "${have_chromium}" ]; then
       echo "[PW] Reusing cached Chromium at: ${have_chromium}"
-      # Properly filter the array WITHOUT leaving empty elements
       declare -a filtered=()
       for b in "${INSTALL_SET[@]}"; do
         if [ "$b" != "chromium" ] && [ -n "$b" ]; then
           filtered+=("$b")
         fi
       done
-      # macOS/Linux bash: simple, safe length check
       if [ "${#filtered[@]}" -gt 0 ]; then
         INSTALL_SET=("${filtered[@]}")
       else
@@ -103,7 +101,7 @@ if [ "$PW_SKIP_INSTALL" != "1" ]; then
     fi
     # ---------------------------------------------------------------------
 
-    # Linux root/CI → allow --with-deps; elsewhere, plain install to avoid EACCES/frozen webkit
+    # Linux root/CI → allow --with-deps; elsewhere, plain install
     if command -v apt-get >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then
       if [ "${#INSTALL_SET[@]}" -gt 0 ]; then
         echo "[PW] Installing Playwright browsers (+deps): ${INSTALL_SET[*]} …"
@@ -121,12 +119,10 @@ if [ "$PW_SKIP_INSTALL" != "1" ]; then
       fi
     fi
 
-    # Optional OS deps bootstrap: only when explicitly requested
-    if command -v apt-get >/dev/null 2>&1 && [ "$(id -u)" = "0" ]; then
-      if [ "${PW_BOOTSTRAP_DEPS:-0}" = "1" ]; then
-        echo "[PW] Installing system deps for PW (bootstrap)…"
-        ./node_modules/.bin/playwright install-deps || true
-      fi
+    # Optional OS deps bootstrap
+    if command -v apt-get >/dev/null 2>&1 && [ "$(id -u)" = "0" ] && [ "${PW_BOOTSTRAP_DEPS:-0}" = "1" ]; then
+      echo "[PW] Installing system deps for PW (bootstrap)…"
+      ./node_modules/.bin/playwright install-deps || true
     fi
   else
     echo "[PW] ERROR: Playwright CLI not found after npm install."
@@ -136,14 +132,15 @@ if [ "$PW_SKIP_INSTALL" != "1" ]; then
 fi
 
 # ---- Defaults that look like a real user (read by playwright.config.ts) ----
-export PW_CHANNEL="${PW_CHANNEL:-chrome}"        # config uses it; we don't pass --channel here
-export PW_SLOWMO="${PW_SLOWMO:-10}"              # tiny human-ish pacing in CI helps
+export PW_CHANNEL="${PW_CHANNEL:-chrome}"
+export PW_SLOWMO="${PW_SLOWMO:-10}"   # tiny human-ish pacing in CI helps
+
 # Headed by default unless explicitly forced off
 _headless_raw="${PW_HEADLESS:-false}"
 case "$(printf '%s' "$_headless_raw" | tr '[:upper:]' '[:lower:]')" in
-  1|true|yes)  export PW_HEADLESS="true"  ;;
+  1|true|yes)    export PW_HEADLESS="true"  ;;
   0|false|no|'') export PW_HEADLESS="false" ;;
-  *)           export PW_HEADLESS="false" ;;
+  *)             export PW_HEADLESS="false" ;;
 esac
 
 # Locale / timezone / language / UA ⇒ coherent browser profile
@@ -158,7 +155,6 @@ export PW_RESEED_STATE="${PW_RESEED_STATE:-0}"
 
 # ---- Auto-detect Chrome and export CHROME_PATH (used by config) ----
 if [ -z "${CHROME_PATH:-}" ]; then
-  # macOS
   mac_chrome="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
   if [ -x "$mac_chrome" ]; then
     export CHROME_PATH="$mac_chrome"
@@ -167,7 +163,7 @@ if [ -z "${CHROME_PATH:-}" ]; then
   elif command -v google-chrome >/dev/null 2>&1; then
     export CHROME_PATH="$(command -v google-chrome)"
   elif command -v chromium >/dev/null 2>&1; then
-    export CHROME_PATH="$(command -v chromium)"  # fallback if Chrome not present
+    export CHROME_PATH="$(command -v chromium)"
   fi
 fi
 
@@ -179,20 +175,40 @@ else
   echo "[PW] Chrome binary not detected via CHROME_PATH; relying on Playwright channel='${PW_CHANNEL}'."
 fi
 
-# Export so playwright.config.ts & global-setup.ts can read them
 export PW_CHANNEL PW_SLOWMO PW_HEADLESS CHROME_PATH
 
+# ---- Preflight: validate CHECKOUT_URL (common copy/paste mistakes) ----
+if [ -n "${CHECKOUT_URL:-}" ]; then
+  # Don’t allow escaping the fragment; it breaks Stripe pages.
+  if [[ "${CHECKOUT_URL}" == *\\#* ]]; then
+    echo "[PW][ERR] CHECKOUT_URL contains a backslash before '#'."
+    echo "[PW][ERR] Use quotes but do NOT escape '#'. Example:"
+    echo "           CHECKOUT_URL='https://...#fidkdWxO...' ./run-pw.sh test --project=stripe-ci"
+    exit 3
+  fi
+  # Redacted echo (show origin + path only)
+  printf -v _redacted '%s' "${CHECKOUT_URL%%\#*}"
+  echo "[PW] CHECKOUT_URL_OK=yes (${_redacted}#…)"
+else
+  echo "[PW] CHECKOUT_URL_OK=no"
+fi
+
 # ---- Extra CLI flags (keep minimal; config handles most) ----
-EXTRA_ARGS=()
 if [ "${1:-}" = "test" ]; then
-  [ -n "${PW_RETRIES:-}" ]    && EXTRA_ARGS+=( "--retries=${PW_RETRIES}" )
-  [ -n "${PW_TIMEOUT_MS:-}" ] && EXTRA_ARGS+=( "--timeout=${PW_TIMEOUT_MS}" )
+  [ -n "${PW_RETRIES:-}" ]    && EXTRA_ARGS+=("--retries=${PW_RETRIES}")
+  [ -n "${PW_TIMEOUT_MS:-}" ] && EXTRA_ARGS+=("--timeout=${PW_TIMEOUT_MS}")
   # Do NOT pass --channel/--headed here; config reads env and decides.
 fi
 
 # ---- Decide how to launch (Xvfb on Linux when headed & no DISPLAY) ----
 BIN="./node_modules/.bin/playwright"
-run_cmd=("$BIN" "$@" "${EXTRA_ARGS[@]}")
+if [ ! -x "$BIN" ]; then
+  echo "[PW][ERR] Playwright binary missing at ${BIN}"
+  exit 1
+fi
+
+# Safe expansion even when EXTRA_ARGS is empty (mac bash 3.2 + set -u friendly)
+run_cmd=("$BIN" "$@" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"})
 
 use_xvfb=false
 if [ "${1:-}" = "test" ] && [ "${PW_HEADLESS}" = "false" ]; then
@@ -205,7 +221,6 @@ fi
 echo "[PW] env: CI=${CI:-}, PW_HEADLESS=${PW_HEADLESS}, PW_CHANNEL=${PW_CHANNEL}, PW_SLOWMO=${PW_SLOWMO}"
 echo "[PW] locale=${PW_LOCALE}, tz=${PW_TZ}, accept-language='${PW_ACCEPT_LANGUAGE}'"
 echo "[PW] user-agent='${PW_UA}'"
-echo "[PW] CHECKOUT_URL=${CHECKOUT_URL:-<unset>}"
 echo "[PW] PW_STORAGE_STATE=${PW_STORAGE_STATE:-<unset>} $( [ -n "${PW_STORAGE_STATE:-}" ] && [ -f "${PW_STORAGE_STATE}" ] && echo '[exists]' || true )"
 echo "[PW] CHROME_PATH=${CHROME_PATH:-<unset>}"
 echo "[PW] PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH}"
